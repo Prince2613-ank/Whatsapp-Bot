@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  whatsapp-bot:
+    build: .
+    container_name: whatsapp-task-bot
+    restart: unless-stopped
+    volumes:
+      # Persistent storage: keeps your WhatsApp session and tasks across container updates
+      - ./.wwebjs_auth:/app/.wwebjs_auth
+      - ./tasks.json:/app/tasks.json
+    environment:
+      - NODE_ENV=production
+      - PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium

@@ -14,7 +14,9 @@ const client = new Client({
     }),
     puppeteer: {
         headless: true,
-        executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || (process.platform === 'win32' 
+            ? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' 
+            : '/usr/bin/chromium'),
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
