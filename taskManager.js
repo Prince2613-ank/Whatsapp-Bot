@@ -34,8 +34,36 @@ class TaskManager {
     }
 
     getNextId() {
+        this.loadTasks();
         if (this.tasks.length === 0) return 1;
         return Math.max(...this.tasks.map(t => t.id || 0)) + 1;
+    }
+
+    getTaskById(taskId) {
+        this.loadTasks();
+        return this.tasks.find(t => t.id === Number(taskId)) || null;
+    }
+
+    /**
+     * Finds if an active/pending task with similar description already exists in this chat
+     */
+    findDuplicateActiveTask(chatId, text) {
+        if (!text) return null;
+        this.loadTasks();
+        const normalize = str => (str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+        const normTarget = normalize(text);
+        if (!normTarget) return null;
+
+        return this.tasks.find(t => {
+            if (t.chatId !== chatId) return false;
+            if (t.status === 'DONE' || t.status === 'CANCELLED') return false;
+
+            const normDesc = normalize(t.description);
+            const normTopic = normalize(t.topic);
+
+            return normDesc === normTarget || normTopic === normTarget ||
+                   normDesc.includes(normTarget) || normTarget.includes(normDesc);
+        }) || null;
     }
 
     /**
@@ -54,7 +82,6 @@ class TaskManager {
         // If parsed time is already in the past for today, advance by 24h if it had no explicit date
         const now = new Date();
         if (targetDate.getTime() <= now.getTime()) {
-            // Check if the user didn't specify a date (just time like "3pm")
             if (!dateComponent.start.isCertain('day') && !dateComponent.start.isCertain('month')) {
                 targetDate.setDate(targetDate.getDate() + 1);
             }
@@ -62,7 +89,6 @@ class TaskManager {
 
         // Remove the matched time portion from the description
         let cleanDescription = input.replace(dateComponent.text, '').trim();
-        // Clean up common leading/trailing prepositions (e.g. "at", "by", "on")
         cleanDescription = cleanDescription.replace(/^(at|by|on|for)\s+/i, '').replace(/\s+(at|by|on|for)$/i, '').trim();
 
         if (!cleanDescription) {
@@ -79,7 +105,6 @@ class TaskManager {
     /**
      * Parses a natural language follow-up string.
      * e.g. "Vaibhav Sir about spreadsheet tomorrow at 11am"
-     * e.g. "spreadsheet with Vaibhav Sir at 11am tomorrow"
      */
     parseFollowupInput(input) {
         const parsedTime = this.parseTaskInput(input);
@@ -89,9 +114,7 @@ class TaskManager {
         let targetPerson = null;
         let topic = cleanText;
 
-        // Pattern 1: "<Person> about/for/regarding <Topic>"
         const matchAbout = cleanText.match(/^(.+?)\s+(?:about|for|regarding|on)\s+(.+)$/i);
-        // Pattern 2: "<Topic> with/to <Person>"
         const matchWith = cleanText.match(/^(.+?)\s+(?:with|to)\s+(.+)$/i);
 
         if (matchAbout) {
@@ -114,6 +137,7 @@ class TaskManager {
      * Creates a new scheduled task
      */
     addTask(chatId, senderName, description, targetTime, intervalMinutes = 1, options = {}) {
+        this.loadTasks();
         const task = {
             id: this.getNextId(),
             chatId: chatId,
@@ -151,41 +175,86 @@ class TaskManager {
     }
 
     /**
-     * Completes a task by ID, or completes the latest active/pending task in the chat
+     * Reschedules an existing task and cancels previous reminder timers
      */
-    completeTask(chatId, taskId = null) {
-        let task = null;
-
-        if (taskId) {
-            task = this.tasks.find(t => t.id === Number(taskId) && t.chatId === chatId);
-        } else {
-            // Pick the latest pending or active task for this chat
-            const candidates = this.tasks
-                .filter(t => t.chatId === chatId && (t.status === 'ACTIVE' || t.status === 'PENDING'))
-                .sort((a, b) => b.id - a.id);
-            task = candidates[0];
-        }
-
+    rescheduleTask(chatId, taskId, newTargetTime, newDescription = null) {
+        this.loadTasks();
+        const task = this.tasks.find(t => t.id === Number(taskId) && t.chatId === chatId);
         if (!task || task.status === 'DONE' || task.status === 'CANCELLED') {
             return null;
         }
 
-        task.status = 'DONE';
-        task.completedAt = Date.now();
+        task.targetTime = newTargetTime.getTime ? newTargetTime.getTime() : newTargetTime;
+        if (newDescription && newDescription.length > 2) {
+            task.description = newDescription;
+        }
+        task.status = 'PENDING'; // reset back to PENDING
+        task.lastRemindedAt = null; // CANCEL previous recurring reminder state
+        task.reminderCount = 0; // reset reminder counter
+        task.rescheduledAt = Date.now();
+
         this.saveTasks();
         return task;
+    }
+
+    /**
+     * Completes a task:
+     * - If taskId is provided, completes that exact task.
+     * - If taskId is null:
+     *   - If only 1 active task exists, completes it safely.
+     *   - If multiple active tasks exist, DOES NOT GUESS. Returns { ambiguous: true, tasks }.
+     */
+    completeTask(chatId, taskId = null) {
+        this.loadTasks();
+
+        if (taskId) {
+            const task = this.tasks.find(t => t.id === Number(taskId) && t.chatId === chatId);
+            if (!task || task.status === 'DONE' || task.status === 'CANCELLED') {
+                return { notFound: true, taskId };
+            }
+
+            task.status = 'DONE';
+            task.completedAt = Date.now();
+            task.lastRemindedAt = null; // stop any reminder timers immediately
+            this.saveTasks();
+            return { success: true, task };
+        }
+
+        // If no ID is specified, check active tasks
+        const activeTasks = this.getActiveTasks(chatId);
+
+        if (activeTasks.length === 0) {
+            return { noActive: true };
+        }
+
+        if (activeTasks.length === 1) {
+            const task = activeTasks[0];
+            task.status = 'DONE';
+            task.completedAt = Date.now();
+            task.lastRemindedAt = null; // stop any reminder timers immediately
+            this.saveTasks();
+            return { success: true, task };
+        }
+
+        // Multiple tasks exist: Do not guess!
+        return {
+            ambiguous: true,
+            tasks: activeTasks
+        };
     }
 
     /**
      * Cancels a task
      */
     cancelTask(chatId, taskId) {
+        this.loadTasks();
         const task = this.tasks.find(t => t.id === Number(taskId) && t.chatId === chatId);
         if (!task || task.status === 'DONE' || task.status === 'CANCELLED') {
             return null;
         }
         task.status = 'CANCELLED';
         task.cancelledAt = Date.now();
+        task.lastRemindedAt = null;
         this.saveTasks();
         return task;
     }
@@ -194,26 +263,29 @@ class TaskManager {
      * Gets all non-completed tasks for a chat
      */
     getActiveTasks(chatId) {
+        this.loadTasks();
         return this.tasks.filter(t => t.chatId === chatId && (t.status === 'PENDING' || t.status === 'ACTIVE'));
     }
 
     /**
-     * Returns list of tasks that require a reminder right now
+     * Returns list of tasks that require a reminder right now.
+     * Always syncs with the database on disk first!
      */
     checkDueTasks() {
+        this.loadTasks(); // Ensure fresh database read
         const now = Date.now();
         const dueList = [];
 
         for (const task of this.tasks) {
             if (task.status === 'DONE' || task.status === 'CANCELLED') continue;
 
-            const intervalMs = (task.intervalMinutes || 60) * 60 * 1000;
+            const intervalMs = (task.intervalMinutes || 1) * 60 * 1000;
 
             // 1. Initial reminder due
             if (task.status === 'PENDING' && now >= task.targetTime) {
                 dueList.push({ task, type: 'INITIAL' });
             }
-            // 2. Hourly recurring reminder due
+            // 2. Recurring reminder due
             else if (task.status === 'ACTIVE' && task.lastRemindedAt && (now - task.lastRemindedAt >= intervalMs)) {
                 dueList.push({ task, type: 'RECURRING' });
             }
@@ -226,6 +298,7 @@ class TaskManager {
      * Updates task after sending a reminder
      */
     markReminded(taskId) {
+        this.loadTasks();
         const task = this.tasks.find(t => t.id === taskId);
         if (!task) return;
 
