@@ -1,0 +1,7 @@
+node_modules/
+.wwebjs_auth/
+.wwebjs_auth_bak/
+.wwebjs_cache/
+*.log
+tasks.json
+.env
